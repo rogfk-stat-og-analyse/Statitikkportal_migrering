@@ -1,0 +1,32 @@
+Queries in a config file (my recommendation)
+
+Same as above, but instead of baking them into code, you store them in e.g. a YAML/JSON/CSV like:
+
+- name: kommune_befolkning
+  method: POST
+  url: "https://.../tables/12345/data?lang=no&outputFormat=parquet"
+  body: |
+    { ... whatever the builder generated ... }
+
+- name: sysselsetting
+  method: POST
+  url: "https://.../tables/67890/data?lang=no&outputFormat=parquet"
+  body: |
+    { ... }
+
+
+Your R code just:
+
+reads this config,
+
+loops over rows,
+
+fires the request and writes the delta tables.
+
+✅ You still skip writing a smart query builder
+
+✅ Easy to add/remove tables without touching code
+
+✅ Very explicit: “this report uses exactly these queries”
+
+❌ Less flexible for dynamic user input later (but you don’t need that yet)
