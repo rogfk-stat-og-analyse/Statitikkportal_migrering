@@ -2,35 +2,87 @@
 
 
 # setup ------------------------------------------------------------------
-
+##SparkR is archieved on CRAN, installing it from the tarball for testing purposes
+##SparkR is natively available on Fabric
+# sparkR_url<- "https://cran.r-project.org/src/contrib/Archive/SparkR/SparkR_3.1.2.tar.gz"
+# sparkR_tar<- "SparkR_3.1.2.tar.gz"
+# download.file(url = sparkR_url,destfile = sparkR_tar)
+# install.packages(pkgs = sparkR_tar,type = "source",repos = NULL)
+# unlink(sparkR_tar)
+# rm(list = ls())
+################
 library(pacman)
 
-p_load(char = c("httr2","rjstat","sparklyr","tidyverse","here","openxlsx","SparkR"))
-
+p_load(char = c("httr2","tidyverse","here","openxlsx"))
+#util pack: "sparklyr","SparkR","rjstat"
 
 # data -------------------------------------------------------------------
 
 tabell_oversikt<- read.xlsx(here("Sp_tabeller","bi_tabeller.xlsx"),sheet = 2)
 
 
-# test -------------------------------------------------------------------
-
-url<-"https://data.ssb.no/api/pxwebapi/v2/tables"
+#mapping it
+excel_dir = ""
+table_dir = ""
+paramDF<-read.xlsx(here("Sp_tabeller","bi_tabeller.xlsx"),sheet = 2)
 
 tabellene<- unique(tabell_oversikt$Tabell)
 
-#reconstitute request
-tabell_df<- tabell_oversikt %>% filter(Tabell == tabellene[1]) %>% 
-  mutate(paramNames = if_else(is.na(Selector),Dimension,paste0(Selector,"[",Dimension,"]")))
+urlParams<- map(.x = tabellene, ~{
+  paramTable = paramDF %>% 
+    filter(Tabell == .x) %>% 
+      mutate(
+        paramNames = if_else(is.na(Selector),Dimension,paste0(Selector,"[",Dimension,"]")),
+        value = as.character(value),# never factors
+        value = stringi::stri_trim_both(value),# trim ASCII + NBSP + UNICODE WS
+        value = gsub("\\s+", "", value)# no spaces inside comma lists
+          
+                         ) 
 
-api_params = setNames(as.list(tabell_df$value),tabell_df$paramNames)
-tmp<- tempfile(fileext = ".parquet")  
-api_req<- request(url) %>% 
-  req_url_path_append(.,tabellene[1],"data") %>% 
-  req_url_query(!!!api_params,outputformat = "parquet") %>% #this can be modified to accommodate other formats. can be parametrized if turned into a function
-  req_perform() %>% 
-  resp_body_raw() #%>% 
-  #writeBin(object = .,con = tmp)# it might be wiser to hold responses in a list first and then itterate over the list to write a tmp.parqeuet
+  api_params = setNames(as.list(paramTable$value),paramTable$paramNames)
+    
+})
+
+apiTabellene <- walk2(.x = urlParams,.y = tabellene,~{
+  tmp<- tempfile(fileext = ".parquet")
+
+  Sys.sleep(15)#sleep the script 15 seconds to give API some breathing room
+
+  api_send<- request("https://data.ssb.no/api/pxwebapi/v2/tables") %>% 
+  req_url_path_append(.,.y,"data") %>% 
+  req_url_query(!!!.x,outputformat = "parquet") %>%#this can be modified to accommodate other formats. can be parametrized if turned into a function,outputformat = "parquet" is easier to pipe into a delta table
+  req_retry(max_tries = 5, backoff = ~ runif(1, 2, 6))  
+  
+  api_reg<-req_perform(api_send) 
+  
+  if(resp_status(api_req)==200L ){
+  
+    if (!length(resp_body_raw(api_req))) {
+      warning(sprintf("Tabell %s returned empty body", .y))
+      return(invisible(NULL))
+    }
+
+  apiResp<- api_req%>% 
+  resp_body_raw() %>% 
+  writeBin(object = .,con = tmp)
+  
+  tabell_delta<- SparkR::read.df(tmp,source = "parquet")                             #
+  
+  SparkR::saveAsTable(
+    df        = sdf,
+    tableName = paste0("bronze_", .y),
+    source    = "delta",
+    mode      = "overwrite"
+  )
+  }else{
+    
+      warning(sprintf("Tabell %s returned %s", .y, resp_status(api_req)))
+      return(invisible(NULL))
+  }
+  
+},.progress = T)
+
+
 
 #####################################################################################
 #There are several other methods of reading a parquet file as well.                 #
@@ -39,7 +91,6 @@ api_req<- request(url) %>%
 #tabell_delta<- SparkR::read.df(tmp,source = "parquet")                             #
 #saveAsTable(sdf,paste0("bronze_",tabellene[i]),source = "delta",mode = "overwrite")#
 #####################################################################################
-
 
 # notes ------------------------------------------------------------------
 
